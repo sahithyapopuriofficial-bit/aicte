@@ -1,0 +1,115 @@
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------------------------
+  # Relational Database: PostgreSQL 16
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: complianceflow_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-compliance_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-compliance_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-aicte_complianceflow}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-compliance_user} -d ${POSTGRES_DB:-aicte_complianceflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - complianceflow_net
+
+  # ---------------------------------------------------------------------------
+  # Backend API & SLA Engine: FastAPI + APScheduler
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: complianceflow_backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+    environment:
+      PROJECT_NAME: "AICTE ComplianceFlow"
+      ENVIRONMENT: "development"
+      DEBUG: "true"
+      SECRET_KEY: ${SECRET_KEY:-development-insecure-secret-key-change-in-production-min-32-chars}
+      POSTGRES_SERVER: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-compliance_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-compliance_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-aicte_complianceflow}
+      BACKEND_CORS_ORIGINS: "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
+      LOCAL_STORAGE_DIR: "/app/storage_uploads"
+      SMTP_ENABLED: "true"
+      SMTP_HOST: "mailhog"
+      SMTP_PORT: 1025
+      EMAILS_FROM_EMAIL: "noreply-compliance@aicte-india.org"
+      EMAILS_FROM_NAME: "AICTE ComplianceFlow Automation"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - backend_storage:/app/storage_uploads
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    networks:
+      - complianceflow_net
+
+  # ---------------------------------------------------------------------------
+  # Frontend Client: Vite / React
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: complianceflow_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    networks:
+      - complianceflow_net
+
+  # ---------------------------------------------------------------------------
+  # Local Email Ingestion & Web Inspector (MailHog)
+  # ---------------------------------------------------------------------------
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: complianceflow_mailhog
+    restart: unless-stopped
+    ports:
+      - "1025:1025" # SMTP ingestion port
+      - "8025:8025" # Web mailbox UI
+    networks:
+      - complianceflow_net
+
+# -----------------------------------------------------------------------------
+# Named Volumes & Bridge Network
+# -----------------------------------------------------------------------------
+volumes:
+  postgres_data:
+    name: complianceflow_postgres_data
+  backend_storage:
+    name: complianceflow_backend_storage
+
+networks:
+  complianceflow_net:
+    name: complianceflow_network
+    driver: bridge
